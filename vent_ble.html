@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#121518">
+<title>Vent</title>
+<style>
+  :root { --bg:#121518; --card:#1c2126; --text:#e8eaed; --dim:#9aa3ab; --on:#3fb950; --off:#6e7681; --accent:#4c9aff; --warn:#d29922; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--text); font:16px/1.4 system-ui, sans-serif; max-width:520px; margin-inline:auto; }
+  header { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+  h1 { font-size:24px; margin:0; }
+  .pill { font-size:13px; padding:4px 10px; border-radius:999px; background:var(--card); color:var(--dim); }
+  .pill.on { color:var(--on); } .pill.wait { color:var(--warn); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:12px 0; }
+  .card { background:var(--card); border-radius:12px; padding:12px; }
+  .label { font-size:13px; color:var(--dim); }
+  .big { font-size:30px; font-weight:600; margin:2px 0; }
+  .sub { font-size:14px; color:var(--dim); }
+  .sub.on { color:var(--on); }
+  button { font:inherit; color:var(--text); background:var(--card); border:1px solid #2d333b; border-radius:10px; padding:14px; width:100%; }
+  button:active { background:#262c33; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  button:disabled { opacity:.4; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px; }
+  label { display:flex; justify-content:space-between; color:var(--dim); font-size:14px; }
+  input[type=range] { width:100%; margin:10px 0 16px; accent-color:var(--accent); height:28px; }
+  #msg { color:var(--warn); font-size:14px; min-height:1.4em; margin:8px 0 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Vent</h1>
+  <span id="conn" class="pill">Not connected</span>
+</header>
+
+<button id="connectBtn" class="primary">Connect</button>
+<p id="msg"></p>
+
+<section class="grid">
+  <div class="card"><div class="label">Qidi Plus 4</div><div class="big" id="qidi">–</div><div class="sub" id="qidiOn">–</div></div>
+  <div class="card"><div class="label">Phrozen Arco</div><div class="big" id="arco">–</div><div class="sub" id="arcoOn">–</div></div>
+  <div class="card"><div class="label">Inline fan</div><div class="big" id="fanSet">–</div><div class="sub" id="rpm">–</div></div>
+  <div class="card"><div class="label">Window vent</div><div class="big" id="vent">–</div><div class="sub" id="mode">–</div></div>
+</section>
+
+<section>
+  <div class="row">
+    <button data-cmd="1">Open vent</button>
+    <button data-cmd="2">Close vent</button>
+  </div>
+  <label>Inline fan <span id="sliderVal">–</span></label>
+  <input type="range" id="fan" min="0" max="100" step="5" value="0">
+  <button data-cmd="4">Back to auto</button>
+</section>
+
+<script>
+const SVC = '6e1f0001-8b3a-4c2e-9f4d-7a5c2b1e0a01';
+const ST  = '6e1f0002-8b3a-4c2e-9f4d-7a5c2b1e0a01';
+const CMD = '6e1f0003-8b3a-4c2e-9f4d-7a5c2b1e0a01';
+
+const $ = id => document.getElementById(id);
+let device = null, cmdChar = null, busy = false, queued = null, sliderActive = false, reconnecting = false;
+
+function setMsg(t) { $('msg').textContent = t || ''; }
+function setConn(t, cls) { const c = $('conn'); c.textContent = t; c.className = 'pill ' + (cls || ''); }
+
+if (!navigator.bluetooth) {
+  setMsg('This browser has no Web Bluetooth. Open this page in Chrome on Android.');
+  $('connectBtn').disabled = true;
+}
+
+$('connectBtn').onclick = async () => {
+  try {
+    device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    await attach();
+  } catch (e) {
+    setMsg(e.message);
+    setConn('Not connected');
+  }
+};
+
+async function attach() {
+  setConn('Connecting…', 'wait');
+  const server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(SVC);
+  const st = await svc.getCharacteristic(ST);
+  cmdChar = await svc.getCharacteristic(CMD);
+  st.addEventListener('characteristicvaluechanged', e => show(e.target.value));
+  await st.startNotifications();
+  show(await st.readValue());
+  setConn('Connected', 'on');
+  setMsg('');
+  $('connectBtn').style.display = 'none';
+}
+
+// Keep trying to reconnect every 3 s (e.g. after walking out of range)
+function onDisconnected() {
+  cmdChar = null;
+  if (reconnecting) return;
+  reconnecting = true;
+  setConn('Reconnecting…', 'wait');
+  const tryAgain = async () => {
+    try { await attach(); reconnecting = false; }
+    catch (e) { setTimeout(tryAgain, 3000); }
+  };
+  setTimeout(tryAgain, 1000);
+}
+
+function show(dv) {
+  if (dv.byteLength < 7) return;
+  const f = dv.getUint8(0), q = dv.getUint8(1), a = dv.getUint8(2), fan = dv.getUint8(3), rpm = dv.getUint16(4, true);
+  $('qidi').textContent = q === 255 ? '–' : q + ' %';
+  $('arco').textContent = a === 255 ? '–' : a + ' %';
+  $('qidiOn').textContent = (f & 1) ? 'fan ON' : 'fan off';  $('qidiOn').className = 'sub' + ((f & 1) ? ' on' : '');
+  $('arcoOn').textContent = (f & 2) ? 'fan ON' : 'fan off';  $('arcoOn').className = 'sub' + ((f & 2) ? ' on' : '');
+  $('fanSet').textContent = fan + ' %';
+  $('rpm').textContent = rpm + ' RPM';
+  $('vent').textContent = (f & 4) ? 'Open' : 'Closed';
+  $('mode').textContent = (f & 8) ? 'Auto' : 'Manual';
+  if (!sliderActive) { $('fan').value = fan; $('sliderVal').textContent = fan + ' %'; }
+}
+
+// One write at a time; while busy only the latest command is kept
+async function send(cmd, val = 0) {
+  if (!cmdChar) { setMsg('Not connected'); return; }
+  if (busy) { queued = [cmd, val]; return; }
+  busy = true;
+  try { await cmdChar.writeValueWithResponse(new Uint8Array([cmd, val])); }
+  catch (e) { setMsg(e.message); }
+  busy = false;
+  if (queued) { const [c, v] = queued; queued = null; send(c, v); }
+}
+
+document.querySelectorAll('button[data-cmd]').forEach(b => b.onclick = () => send(+b.dataset.cmd));
+
+const fan = $('fan');
+fan.addEventListener('input', () => { sliderActive = true; $('sliderVal').textContent = fan.value + ' %'; send(3, +fan.value); });
+fan.addEventListener('change', () => { send(3, +fan.value); setTimeout(() => sliderActive = false, 1500); });
+</script>
+</body>
+</html>
