@@ -55,13 +55,21 @@
   <button data-cmd="4">Back to auto</button>
 </section>
 
+<section id="settings" class="card" style="margin-top:16px; display:none">
+  <div class="label" style="margin-bottom:8px">Auto fan rule: highest printer % × boost, at least the minimum</div>
+  <label>Boost <span id="multVal">–</span></label>
+  <input type="range" id="mult" min="10" max="30" step="1" value="12">
+  <label>Minimum when a printer fan is on <span id="minVal">–</span></label>
+  <input type="range" id="minp" min="0" max="60" step="5" value="30">
+</section>
+
 <script>
 const SVC = '6e1f0001-8b3a-4c2e-9f4d-7a5c2b1e0a01';
 const ST  = '6e1f0002-8b3a-4c2e-9f4d-7a5c2b1e0a01';
 const CMD = '6e1f0003-8b3a-4c2e-9f4d-7a5c2b1e0a01';
 
 const $ = id => document.getElementById(id);
-let device = null, cmdChar = null, busy = false, queued = null, sliderActive = false, reconnecting = false;
+let device = null, cmdChar = null, busy = false, queued = null, sliderActive = false, reconnecting = false, settingsActive = false;
 
 function setMsg(t) { $('msg').textContent = t || ''; }
 function setConn(t, cls) { const c = $('conn'); c.textContent = t; c.className = 'pill ' + (cls || ''); }
@@ -121,6 +129,14 @@ function show(dv) {
   $('vent').textContent = (f & 4) ? 'Open' : 'Closed';
   $('mode').textContent = (f & 8) ? 'Auto' : 'Manual';
   if (!sliderActive) { $('fan').value = fan; $('sliderVal').textContent = fan + ' %'; }
+  if (dv.byteLength >= 9) {
+    $('settings').style.display = '';
+    if (!settingsActive) {
+      const m = dv.getUint8(7), mn = dv.getUint8(8);
+      $('mult').value = m;  $('multVal').textContent = '× ' + (m / 10).toFixed(1);
+      $('minp').value = mn; $('minVal').textContent = mn + ' %';
+    }
+  }
 }
 
 // One write at a time; while busy only the latest command is kept
@@ -139,6 +155,13 @@ document.querySelectorAll('button[data-cmd]').forEach(b => b.onclick = () => sen
 const fan = $('fan');
 fan.addEventListener('input', () => { sliderActive = true; $('sliderVal').textContent = fan.value + ' %'; send(3, +fan.value); });
 fan.addEventListener('change', () => { send(3, +fan.value); setTimeout(() => sliderActive = false, 1500); });
+
+// Settings: send when the slider is released
+const mult = $('mult'), minp = $('minp');
+mult.addEventListener('input', () => { settingsActive = true; $('multVal').textContent = '× ' + (mult.value / 10).toFixed(1); });
+minp.addEventListener('input', () => { settingsActive = true; $('minVal').textContent = minp.value + ' %'; });
+mult.addEventListener('change', () => { send(5, +mult.value); setTimeout(() => settingsActive = false, 1500); });
+minp.addEventListener('change', () => { send(6, +minp.value); setTimeout(() => settingsActive = false, 1500); });
 </script>
 </body>
 </html>
