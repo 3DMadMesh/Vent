@@ -27,6 +27,8 @@
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
   button:disabled { opacity:.4; }
   .row { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px; }
+  .row4 { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin:12px 0 4px; }
+  .tip { font-size:13px; color:var(--dim); margin:4px 0 12px; }
   label { display:flex; justify-content:space-between; color:var(--dim); font-size:14px; }
   input[type=range] { width:100%; margin:10px 0 16px; accent-color:var(--accent); height:28px; }
   #msg { color:var(--warn); font-size:14px; min-height:1.4em; margin:8px 0 0; }
@@ -66,13 +68,34 @@
   <input type="range" id="minp" min="0" max="60" step="5" value="30">
 </section>
 
+<section id="servo" class="card" style="margin-top:16px; display:none">
+  <div class="label">Vent servo</div>
+  <div class="big" id="servoAngle">–</div>
+  <div class="sub" id="servoInfo">–</div>
+  <div id="calControls" style="display:none">
+    <div class="row4">
+      <button data-jog="-5">−5°</button><button data-jog="-1">−1°</button>
+      <button data-jog="1">+1°</button><button data-jog="5">+5°</button>
+    </div>
+    <input type="range" id="calSlider" min="0" max="180" step="1" value="90">
+    <div class="tip">Stop just before the vent reaches its end stop. A buzzing servo means it's pushing too far: back off a few degrees.</div>
+    <div class="row">
+      <button id="saveOpen">Save as OPEN</button>
+      <button id="saveClosed">Save as CLOSED</button>
+    </div>
+  </div>
+  <button id="calToggle" style="margin-top:12px">Start calibration</button>
+</section>
+
 <script>
 const SVC = '6e1f0001-8b3a-4c2e-9f4d-7a5c2b1e0a01';
 const ST  = '6e1f0002-8b3a-4c2e-9f4d-7a5c2b1e0a01';
 const CMD = '6e1f0003-8b3a-4c2e-9f4d-7a5c2b1e0a01';
 
 const $ = id => document.getElementById(id);
-let device = null, cmdChar = null, busy = false, queued = null, sliderActive = false, reconnecting = false, settingsActive = false;
+let device = null, cmdChar = null, busy = false, sliderActive = false, reconnecting = false, settingsActive = false;
+let calOn = false, calTarget = null, calSliderActive = false;
+const queue = [];
 
 function setMsg(t) { $('msg').textContent = t || ''; }
 function setConn(t, cls) { const c = $('conn'); c.textContent = t; c.className = 'pill ' + (cls || ''); }
@@ -132,6 +155,7 @@ function show(dv) {
   $('vent').textContent = (f & 4) ? 'Open' : 'Closed';
   $('mode').textContent = (f & 8) ? 'Auto' : 'Manual';
   if (!sliderActive) { $('fan').value = fan; $('sliderVal').textContent = fan + ' %'; }
+  if (dv.byteLength >= 13) showServo(dv);
   if (dv.byteLength >= 9) {
     $('settings').style.display = '';
     if (!settingsActive) {
@@ -142,15 +166,37 @@ function show(dv) {
   }
 }
 
-// One write at a time; while busy only the latest command is kept
-async function send(cmd, val = 0) {
+function showServo(dv) {
+  $('servo').style.display = '';
+  const ang = dv.getUint8(9), op = dv.getUint8(10), cl = dv.getUint8(11), sf = dv.getUint8(12);
+  const cal = !!(sf & 1), done = !!(sf & 2);
+  $('servoAngle').textContent = ang === 255 ? 'off' : ang + '°';
+  $('servoInfo').textContent = (done ? 'open ' + op + '° · closed ' + cl + '°' : 'not calibrated yet') + (cal ? ' · calibrating' : '');
+  $('calControls').style.display = cal ? '' : 'none';
+  $('calToggle').textContent = cal ? 'Done – leave calibration' : 'Start calibration';
+  calOn = cal;
+  if (!cal) calTarget = null;
+  else if (calTarget === null) calTarget = (ang === 255 ? 90 : ang);
+  if (cal && !calSliderActive && calTarget !== null) $('calSlider').value = calTarget;
+}
+
+// Writes go out one at a time, in order. Repeated slider / angle commands are merged.
+const MERGE = [3, 5, 6, 7];
+function send(cmd, val = 0) {
   if (!cmdChar) { setMsg('Not connected'); return; }
-  if (busy) { queued = [cmd, val]; return; }
+  const last = queue[queue.length - 1];
+  if (last && last[0] === cmd && MERGE.includes(cmd)) last[1] = val;
+  else queue.push([cmd, val]);
+  if (!busy) pump();
+}
+async function pump() {
   busy = true;
-  try { await cmdChar.writeValueWithResponse(new Uint8Array([cmd, val])); }
-  catch (e) { setMsg(e.message); }
+  while (queue.length) {
+    const [c, v] = queue.shift();
+    try { await cmdChar.writeValueWithResponse(new Uint8Array([c, v])); }
+    catch (e) { setMsg(e.message); queue.length = 0; }
+  }
   busy = false;
-  if (queued) { const [c, v] = queued; queued = null; send(c, v); }
 }
 
 document.querySelectorAll('button[data-cmd]').forEach(b => b.onclick = () => send(+b.dataset.cmd));
@@ -165,6 +211,24 @@ mult.addEventListener('input', () => { settingsActive = true; $('multVal').textC
 minp.addEventListener('input', () => { settingsActive = true; $('minVal').textContent = minp.value + ' %'; });
 mult.addEventListener('change', () => { send(5, +mult.value); setTimeout(() => settingsActive = false, 1500); });
 minp.addEventListener('change', () => { send(6, +minp.value); setTimeout(() => settingsActive = false, 1500); });
+
+// Servo calibration
+$('calToggle').onclick = () => send(10, calOn ? 0 : 1);
+document.querySelectorAll('button[data-jog]').forEach(b => b.onclick = () => {
+  if (calTarget === null) return;
+  calTarget = Math.max(0, Math.min(180, calTarget + (+b.dataset.jog)));
+  $('calSlider').value = calTarget;
+  send(7, calTarget);
+});
+const calSlider = $('calSlider');
+calSlider.addEventListener('input', () => { calSliderActive = true; });
+calSlider.addEventListener('change', () => {
+  calTarget = +calSlider.value;
+  send(7, calTarget);
+  setTimeout(() => calSliderActive = false, 1500);
+});
+$('saveOpen').onclick = () => { send(8); setMsg('Saved as OPEN: ' + calTarget + '°'); setTimeout(() => setMsg(''), 3000); };
+$('saveClosed').onclick = () => { send(9); setMsg('Saved as CLOSED: ' + calTarget + '°'); setTimeout(() => setMsg(''), 3000); };
 </script>
 </body>
 </html>
